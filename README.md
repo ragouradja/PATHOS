@@ -1,12 +1,30 @@
-# PATHOS - Protein variant Analysis Through Human-Optimized Scoring
+# PATHOS - Predicting variant pathogenicity by combining Protein Language Models and biological features
 
-PATHOS predicts pathogenicity of protein variants using protein language models (ESM-C 600M, Ankh2 Large). Pre-computed scores for 139M+ variants across 17,574 human proteins.
+PATHOS predicts pathogenicity of protein variants using protein language models (ESM-C 600M, Ankh2 Large). It provides precomputed scores for all possible missense substitutions across 20,416 human proteins, covering 216 million mutations in total. The underlying PLM embeddings for all 216 million mutations (682 million embeddings in total across three models) are publicly available on Hugging Face.
+
+Paper: http://dx.doi.org/10.1016/j.ailsci.2026.100165
+
+## Contents
+
+- [Installation](#installation)
+- [Quick start](#quick-start)
+  - [Single mutation query](#single-mutation-query)
+  - [Batch query from file](#batch-query-from-file)
+  - [Filter results by score](#filter-results-by-score)
+  - [Full protein scan](#full-protein-scan)
+  - [Input file format](#input-file-format)
+- [How it works](#how-it-works)
+- [Output](#output)
+- [Score interpretation](#score-interpretation)
+- [Command-line options](#command-line-options)
+- [Full protein scan](#full-protein-scan-1)
+  - [Proteins in the database](#proteins-in-the-database)
+  - [De novo scan (proteins not in database)](#de-novo-scan-proteins-not-in-database)
+- [PLM embeddings](#plm-embeddings)
+- [Citation](#citation)
+- [Contact](#contact)
 
 ## Installation
-
-Set up PATHOS with a single script that installs dependencies and downloads the database.
-
-**Prerequisites:** ~35 GB disk space
 
 ```bash
 git clone https://github.com/DSIMB/PATHOS.git
@@ -15,27 +33,59 @@ cd PATHOS
 conda activate PATHOS_env
 ```
 
+By default the script downloads only `pathos.db` (~10 GB), which is sufficient to run predictions for all 20,416 precomputed proteins. This covers the vast majority of use cases.
 
-## Usage
+If you need de novo prediction for proteins absent from the database (very large proteins, or proteins added to UniProt after March 2025), run with the `all` argument to also download the allele frequency database, MSA alignments, and the mmseqs2 mammalian database. mmseqs2 is included in the conda environment (from bioconda) and installed automatically by `setup_pathos.sh`.
+
+```bash
+./setup_pathos.sh all
+```
+
+**Disk space requirements:**
+
+| Mode | Size |
+|------|------|
+| Default (`pathos.db` only) | ~12 GB |
+| Full (`all`) | ~35 GB |
+
+
+## Quick start
 
 Query pathogenicity scores for protein variants using UniProt IDs and mutation notation.
 
 ### Single mutation query
 
 ```bash
-python run_pathos.py --protein P16501 --mutation M1A
+python run_pathos.py --protein P51787 --mutation M1A
 ```
 
 ### Batch query from file
 
 ```bash
-python run_pathos.py --file variants.txt --output results.csv
+python run_pathos.py --file example_input.txt --output results.csv
 ```
 
-### Filter results
+### Filter results by score
 
 ```bash
-python run_pathos.py --protein P16501 --min-score 0.9 --output pathogenic.csv
+# Keep only highly pathogenic variants
+python run_pathos.py --protein P51787 --min-score 0.9 --output pathogenic.csv
+
+# Keep only highly benign variants
+python run_pathos.py --protein P51787 --max-score 0.1 --output benign.csv
+
+# Keep variants in a specific range
+python run_pathos.py --protein P51787 --min-score 0.55 --max-score 0.65 --output uncertain.csv
+```
+
+### Full protein scan
+
+```bash
+# For proteins in database (instant)
+python run_pathos.py --protein P51787 --output P51787_all.csv
+
+# For proteins NOT in database (requires --scan, can take hours)
+python run_pathos.py --protein I3L3L1 --scan --output I3L3L1_all.csv
 ```
 
 ### Input file format
@@ -45,7 +95,7 @@ Supports TXT, TSV, and CSV formats. Headers are auto-detected and skipped.
 **TXT/TSV (space or tab-separated):**
 
 ```
-P16501 M1A R56V    # Multiple mutations per line
+P51787 M1A R56V    # Multiple mutations per line
 Q9Y6X3 M1C         # Single mutation
 P10635             # Full scan (all 19 substitutions per position)
 ```
@@ -54,14 +104,14 @@ P10635             # Full scan (all 19 substitutions per position)
 
 ```csv
 Protein,Mutation
-P16501,M1A
-P16501,R56V
+P51787,M1A
+P51787,L50R
 Q9Y6X3,M1C
 ```
 
 ## How it works
 
-If all queried variants are already in the precomputed database (139M+ variants), results are returned instantly.
+Most queries are served instantly from the precomputed database (216M mutations, 20,416 human proteins). De novo prediction is only needed for proteins absent from the database: very large proteins and proteins added to UniProt after March 2025 (the version used to build the database, `uniprotsp_human_20032025_can_isoforms.fasta`), such as I3L3L1.
 
 For variants not in the database, PATHOS performs de novo prediction:
 
@@ -72,6 +122,15 @@ For variants not in the database, PATHOS performs de novo prediction:
 5. Generate embeddings with ESMC 600M and Ankh2 Large
 6. Run PATHOS inference (ensemble of both models)
 
+The precomputed database (`pathos.db`) is a SQLite file and can be queried directly with any SQLite-compatible tool:
+
+```sql
+-- Table: mutations
+-- Columns: protein_id TEXT, mutation TEXT, score REAL
+SELECT score FROM mutations WHERE protein_id = 'P04637' AND mutation = 'R175H';
+```
+
+
 ## Output
 
 Results are displayed in the terminal and exported to CSV with the following columns:
@@ -80,6 +139,7 @@ Results are displayed in the terminal and exported to CSV with the following col
 - Mutation (e.g., M1A)
 - PATHOS score (0-1)
 - Classification (Benign/Pathogenic)
+
 
 ## Score interpretation
 
@@ -96,23 +156,103 @@ Full list of available options for `run_pathos.py`.
 
 | Option | Description |
 |--------|-------------|
-| `-i, --input` | Input file (TXT, TSV, or CSV) |
-| `-o, --output` | Output CSV file |
-| `--n-jobs` | Number of parallel workers for feature generation (default: 5). Increase for faster processing on multi-core systems. |
+| `-p, --protein` | UniProt protein ID (e.g., P51787) |
+| `-m, --mutation` | Mutation in format like M1A (requires --protein) |
+| `-f, --file` | Input file with protein IDs and mutations (TXT, TSV, or CSV) |
+| `-o, --output` | Output CSV file (default: stdout for single mutation) |
+| `--min-score` | Minimum PATHOS score threshold for filtering results (0.0-1.0) |
+| `--max-score` | Maximum PATHOS score threshold for filtering results (0.0-1.0) |
+| `--scan` | Enable de novo full protein scan (required for proteins not in database) |
+| `--n-jobs` | Number of parallel workers for feature generation (default: 5) |
 | `--batch-size` | Batch size for embedding generation (default: 100) |
 | `--mmseqs-mem-limit` | Memory limit for mmseqs2 MSA generation (default: 8G) |
 | `--batch-threshold` | Number of variants above which batched mode is enabled (default: 10000) |
 
-## Embeddings download
-Soon available
+## Full protein scan
+
+PATHOS can predict scores for all possible mutations of a protein (19 substitutions x sequence length).
+
+### Proteins in the database
+
+For proteins already in the precomputed database, simply omit the `--mutation` argument:
+
+```bash
+python run_pathos.py --protein P51787 --output P51787_all.csv
+```
+
+This instantly retrieves all pre-computed scores for that protein.
+
+The full list of 20,416 precomputed proteins is available in [`proteins_in_db.txt`](proteins_in_db.txt).
+
+### De novo scan (proteins not in database)
+
+For proteins not in the database, a full de novo scan requires generating MSA alignments, computing conservation scores, and running embeddings for every possible mutation. This can take several hours. Add the `--scan` flag to enable it:
+
+```bash
+# I3L3L1 was added to UniProt after March 2025 and is not in the precomputed database
+python run_pathos.py --protein I3L3L1 --scan --output I3L3L1_all.csv
+```
+
+For a typical 500-residue protein this means computing predictions for roughly 9,500 mutations.
+
+## PLM embeddings
+
+Precomputed embeddings for all 216M mutations (and wild-type residues) across the 20,416 proteins are available on HuggingFace: https://huggingface.co/datasets/DSIMB/PATHOS-PLM-EMBEDDINGS
+
+The dataset covers three protein language models:
+
+| Model | Embedding dim | Mutation rows | Wild-type rows | Size |
+|-------|--------------|---------------|----------------|------|
+| ESM-C 600M | 1152 | 216.2M | 11.4M | 1.90 TiB |
+| ESM-2 650M | 1280 | 216.2M | 11.4M | 2.10 TiB |
+| Ankh2 Large | 1536 | 216.2M | 11.4M | 2.51 TiB |
+
+Across all three models this represents 682 million embeddings totalling 6.5 TB. PATHOS itself uses ESM-C 600M and Ankh2 Large internally; ESM-2 650M embeddings were generated alongside the others and are provided here for the community.
+
+Each row stores a position-specific embedding (`emb`) extracted at the mutated or wild-type residue, along with a mean-pooled full-sequence embedding (`mean`) that encodes global sequence-level information and can be used directly as a compact protein representation. For proteins longer than 1024 residues, embeddings were generated using a window of 1024 residues centered on the mutated position. Files are in Parquet format distributed across shards.
+
+```python
+from datasets import load_dataset
+
+# Mutation embeddings (streaming recommended given the size)
+ds = load_dataset("DSIMB/PATHOS-PLM-EMBEDDINGS", "esmc_600m", streaming=True)
+
+# Wild-type embeddings
+wt_ds = load_dataset("DSIMB/PATHOS-PLM-EMBEDDINGS", "wt_esmc_600m", streaming=True)
+```
+
+DuckDB can query individual shards directly without downloading the full dataset:
+
+```python
+import duckdb
+
+df = duckdb.sql("""
+    SELECT protein_id, variation, emb, mean
+    FROM 'hf://datasets/DSIMB/PATHOS-PLM-EMBEDDINGS/esmc_600m/data/*.parquet'
+    WHERE protein_id = 'P51787'
+""").df()
+```
+
+The embeddings can be downloaded from Hugging Face and used independently of PATHOS. Typical use cases include:
+
+- Training your own variant effect predictor using protein language model embeddings as input features
+- Investigating the effect of mutations on protein-protein interactions
+- Studying how mutations affect protein stability or conformational changes
+- Linking mutation embedding patterns to disease classes or clinical outcomes
+- Identifying evolutionary constraints: positions that tolerate substitutions vs invariant residues
+- Predicting mutations that confer drug resistance
+
+Each PLM configuration inherits the license of its source model: MIT for ESM-2, CC BY-NC-SA 4.0 for Ankh2, and the Cambrian Non-Commercial license for ESM-C. Non-commercial restrictions apply when using the Ankh2 or ESM-C configs.
 
 ## Citation
 
-If you use PATHOS in your research, please cite:
+If you use PATHOS or PLM embeddings in your research, please cite:
 
-Radjasandirane, R., Cretin, G., Diharce, J., de Brevern, A. G., & Gelly, J. C. (2025). PATHOS: Predicting Variant Pathogenicity by Combining Protein Language Models and Biological Features. medRxiv, 2025-12.
-
+Radjasandirane, R., Cretin, G., Diharce, J., de Brevern, A. G., & Gelly, J. C. (2026). PATHOS: Predicting Variant Pathogenicity by Combining Protein Language Models and Biological Features. Artificial Intelligence in the Life Sciences, 100165.
+http://dx.doi.org/10.1016/j.ailsci.2026.100165
 
 ## Contact
+
+For bug reports, feature requests, or questions, please contact:
 
 radja.ragou@gmail.com
